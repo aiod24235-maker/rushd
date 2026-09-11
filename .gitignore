@@ -1,0 +1,6 @@
+node_modules/
+roshd.db
+.env
+work/
+outputs/
+.DS_Store

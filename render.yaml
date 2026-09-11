@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: roshd-club-points
+    runtime: docker
+    healthCheckPath: /
+    disk:
+      name: roshd-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /var/data/roshd.db
+      - key: ADMIN_PASSWORD
+        generateValue: true
