@@ -7,8 +7,7 @@ const { DatabaseSync } = require('node:sqlite');
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Roshd@2026';
 const ROOT = __dirname;
-const isRender = process.env.RENDER || process.env.NODE_ENV === 'production';
-const DB_PATH = process.env.DATABASE_PATH || (isRender ? path.join('/app', 'data', 'rushd.db') : path.join(ROOT, 'rushd.db'));
+const DB_PATH = path.join(ROOT, 'rushd.db');
 const db = new DatabaseSync(DB_PATH);
 const sessions = new Map();
 
