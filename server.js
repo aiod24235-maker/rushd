@@ -151,7 +151,6 @@ function dateNow(){ return new Date().toISOString().slice(0,10); }
 async function api(req,res,url) {
   const p=url.pathname, method=req.method;
   
-  // مسار عرض بطاقة المحفظة الرقمية مع QR Code مدمج
   if (method==='GET' && p==='/api/wallet-card') {
     const id = url.searchParams.get('student_id');
     const mRes = await dbQuery('SELECT * FROM members WHERE student_id=?', [id]);
@@ -427,5 +426,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Server running on port `${PORT});
+  console.log(`Server running on port ${PORT}`);
 });
