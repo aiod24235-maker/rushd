@@ -151,7 +151,7 @@ function dateNow(){ return new Date().toISOString().slice(0,10); }
 async function api(req,res,url) {
   const p=url.pathname, method=req.method;
   
-  // مسار عرض بطاقة المحفظة الرقمية للعضو
+  // مسار عرض بطاقة المحفظة الرقمية مع QR Code مدمج
   if (method==='GET' && p==='/api/wallet-card') {
     const id = url.searchParams.get('student_id');
     const mRes = await dbQuery('SELECT * FROM members WHERE student_id=?', [id]);
@@ -161,6 +161,7 @@ async function api(req,res,url) {
       return res.end('<h3>العضوية غير موجودة</h3>');
     }
     const enriched = await enrich(m);
+    const cardUrl = `https://${req.headers.host}/api/wallet-card?student_id=${m.student_id}`;
     
     const htmlCard = `<!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -168,19 +169,21 @@ async function api(req,res,url) {
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>بطاقة عضوية نادي رُشد</title>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
       <style>
         body { background: #0f172a; font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }
         .pass-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid rgba(255,255,255,0.15); border-radius: 24px; width: 100%; max-width: 380px; padding: 28px; box-shadow: 0 25px 35px -5px rgba(0, 0, 0, 0.6); color: white; position: relative; overflow: hidden; }
         .pass-card::before { content: ''; position: absolute; top: -60px; right: -60px; width: 160px; height: 160px; background: rgba(52, 211, 153, 0.15); border-radius: 50%; filter: blur(45px); }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 14px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px; }
         .club-name { font-weight: bold; font-size: 1.1rem; color: #34d399; }
         .committee { font-size: 0.8rem; background: rgba(52, 211, 153, 0.15); color: #34d399; padding: 4px 12px; border-radius: 20px; font-weight: 500; }
-        .info-group { margin-bottom: 18px; }
-        .label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px; }
-        .value { font-size: 1.25rem; font-weight: bold; color: #f8fafc; }
-        .footer { display: flex; justify-content: space-between; align-items: center; margin-top: 24px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,0.1); }
-        .points-badge { background: #34d399; color: #064e3b; font-weight: bold; padding: 6px 14px; border-radius: 12px; font-size: 1rem; }
-        .btn-print { display: block; width: 100%; background: #34d399; color: #064e3b; text-align: center; padding: 14px; border-radius: 14px; text-decoration: none; font-weight: bold; margin-top: 24px; border: none; cursor: pointer; transition: 0.2s; box-shadow: 0 4px 12px rgba(52, 211, 153, 0.3); }
+        .info-group { margin-bottom: 14px; }
+        .label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; margin-bottom: 2px; }
+        .value { font-size: 1.15rem; font-weight: bold; color: #f8fafc; }
+        .footer { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.1); }
+        .points-badge { background: #34d399; color: #064e3b; font-weight: bold; padding: 5px 12px; border-radius: 12px; font-size: 0.95rem; }
+        .qrcode-container { display: flex; justify-content: center; margin-top: 16px; background: white; padding: 10px; border-radius: 12px; width: fit-content; margin-left: auto; margin-right: auto; }
+        .btn-print { display: block; width: 100%; background: #34d399; color: #064e3b; text-align: center; padding: 12px; border-radius: 14px; text-decoration: none; font-weight: bold; margin-top: 18px; border: none; cursor: pointer; transition: 0.2s; box-shadow: 0 4px 12px rgba(52, 211, 153, 0.3); }
         .btn-print:hover { background: #10b981; color: #fff; }
       </style>
     </head>
@@ -200,20 +203,31 @@ async function api(req,res,url) {
         </div>
         <div class="info-group">
           <div class="label">المستوى واللقب</div>
-          <div class="value" style="color: #34d399; font-size: 1.1rem;">${enriched.level.title}</div>
+          <div class="value" style="color: #34d399; font-size: 1rem;">${enriched.level.title}</div>
         </div>
         <div class="footer">
           <div>
             <div class="label">الحالة</div>
-            <div style="color: #34d399; font-weight: 600;">${m.status}</div>
+            <div style="color: #34d399; font-weight: 600; font-size: 0.9rem;">${m.status}</div>
           </div>
           <div>
             <div class="label">النقاط الإجمالية</div>
             <div class="points-badge">${m.points} نقطة</div>
           </div>
         </div>
+        <div class="qrcode-container" id="qrcode"></div>
         <button class="btn-print" onclick="window.print()">حفظ أو طباعة البطاقة الرقمية</button>
       </div>
+      <script>
+        new QRCode(document.getElementById("qrcode"), {
+          text: "${cardUrl}",
+          width: 110,
+          height: 110,
+          colorDark: "#0f172a",
+          colorLight: "#ffffff",
+          correctLevel: QRCode.CorrectLevel.H
+        });
+      </script>
     </body>
     </html>`;
     
@@ -413,5 +427,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on port `${PORT});
 });
