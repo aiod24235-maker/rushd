@@ -16,7 +16,6 @@ async function dbQuery(sql, args = []) {
     throw new Error("TURSO_DATABASE_URL or TURSO_AUTH_TOKEN is missing");
   }
   
-  // تحويل الروابط من libsql:// إلى https://
   const baseUrl = TURSO_URL.endsWith('/') ? TURSO_URL.slice(0, -1) : TURSO_URL;
   
   const formattedArgs = args.map(val => {
@@ -152,6 +151,76 @@ function dateNow(){ return new Date().toISOString().slice(0,10); }
 async function api(req,res,url) {
   const p=url.pathname, method=req.method;
   
+  // مسار عرض بطاقة المحفظة الرقمية للعضو
+  if (method==='GET' && p==='/api/wallet-card') {
+    const id = url.searchParams.get('student_id');
+    const mRes = await dbQuery('SELECT * FROM members WHERE student_id=?', [id]);
+    const m = mRes.rows[0];
+    if (!m) {
+      res.writeHead(404, {'Content-Type': 'text/html; charset=utf-8'});
+      return res.end('<h3>العضوية غير موجودة</h3>');
+    }
+    const enriched = await enrich(m);
+    
+    const htmlCard = `<!DOCTYPE html>
+    <html lang="ar" dir="rtl">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>بطاقة عضوية نادي رُشد</title>
+      <style>
+        body { background: #0f172a; font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }
+        .pass-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid rgba(255,255,255,0.15); border-radius: 24px; width: 100%; max-width: 380px; padding: 28px; box-shadow: 0 25px 35px -5px rgba(0, 0, 0, 0.6); color: white; position: relative; overflow: hidden; }
+        .pass-card::before { content: ''; position: absolute; top: -60px; right: -60px; width: 160px; height: 160px; background: rgba(52, 211, 153, 0.15); border-radius: 50%; filter: blur(45px); }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 14px; }
+        .club-name { font-weight: bold; font-size: 1.1rem; color: #34d399; }
+        .committee { font-size: 0.8rem; background: rgba(52, 211, 153, 0.15); color: #34d399; padding: 4px 12px; border-radius: 20px; font-weight: 500; }
+        .info-group { margin-bottom: 18px; }
+        .label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px; }
+        .value { font-size: 1.25rem; font-weight: bold; color: #f8fafc; }
+        .footer { display: flex; justify-content: space-between; align-items: center; margin-top: 24px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,0.1); }
+        .points-badge { background: #34d399; color: #064e3b; font-weight: bold; padding: 6px 14px; border-radius: 12px; font-size: 1rem; }
+        .btn-print { display: block; width: 100%; background: #34d399; color: #064e3b; text-align: center; padding: 14px; border-radius: 14px; text-decoration: none; font-weight: bold; margin-top: 24px; border: none; cursor: pointer; transition: 0.2s; box-shadow: 0 4px 12px rgba(52, 211, 153, 0.3); }
+        .btn-print:hover { background: #10b981; color: #fff; }
+      </style>
+    </head>
+    <body>
+      <div class="pass-card">
+        <div class="header">
+          <span class="club-name">نادي رُشد | Roshd</span>
+          <span class="committee">${m.committee}</span>
+        </div>
+        <div class="info-group">
+          <div class="label">اسم العضو</div>
+          <div class="value">${m.name}</div>
+        </div>
+        <div class="info-group">
+          <div class="label">الرقم الجامعي</div>
+          <div class="value">${m.student_id}</div>
+        </div>
+        <div class="info-group">
+          <div class="label">المستوى واللقب</div>
+          <div class="value" style="color: #34d399; font-size: 1.1rem;">${enriched.level.title}</div>
+        </div>
+        <div class="footer">
+          <div>
+            <div class="label">الحالة</div>
+            <div style="color: #34d399; font-weight: 600;">${m.status}</div>
+          </div>
+          <div>
+            <div class="label">النقاط الإجمالية</div>
+            <div class="points-badge">${m.points} نقطة</div>
+          </div>
+        </div>
+        <button class="btn-print" onclick="window.print()">حفظ أو طباعة البطاقة الرقمية</button>
+      </div>
+    </body>
+    </html>`;
+    
+    res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8'});
+    return res.end(htmlCard);
+  }
+
   if (method==='GET' && p==='/api/member') { 
     const id=url.searchParams.get('student_id'); 
     const mRes = await dbQuery('SELECT student_id,name,committee,points,status,created_at FROM members WHERE student_id=?', [id]);
