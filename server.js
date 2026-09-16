@@ -2,25 +2,80 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { createClient } = require('@libsql/client');
 
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Roshd@2026';
 const ROOT = __dirname;
 
-// الاتصال بقاعدة بيانات Turso السحابية عبر متغيرات البيئة
-const db = createClient({
-  url: process.env.TURSO_DATABASE_URL,
-  authToken: process.env.TURSO_AUTH_TOKEN,
-});
+const TURSO_URL = process.env.TURSO_DATABASE_URL ? process.env.TURSO_DATABASE_URL.replace(/^libsql:\/\//, 'https://') : '';
+const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN || '';
+
+// دالة تنفيذ الاستعلامات عبر HTTP API الخاص بـ Turso مباشرة
+async function dbQuery(sql, args = []) {
+  if (!TURSO_URL || !TURSO_TOKEN) {
+    throw new Error("TURSO_DATABASE_URL or TURSO_AUTH_TOKEN is missing");
+  }
+  
+  // تحويل الروابط من libsql:// إلى https://
+  const baseUrl = TURSO_URL.endsWith('/') ? TURSO_URL.slice(0, -1) : TURSO_URL;
+  
+  const formattedArgs = args.map(val => {
+    if (val === null || val === undefined) return { type: 'null' };
+    if (typeof val === 'number') return { type: Number.isInteger(val) ? 'integer' : 'float', value: String(val) };
+    if (typeof val === 'boolean') return { type: 'integer', value: val ? '1' : '0' };
+    return { type: 'text', value: String(val) };
+  });
+
+  const response = await fetch(`${baseUrl}/v2/pipeline`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${TURSO_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      requests: [
+        { type: 'execute', stmt: { sql, args: formattedArgs } },
+        { type: 'close' }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Turso HTTP Error: ${response.status} - ${errText}`);
+  }
+
+  const data = await response.json();
+  const result = data.results[0];
+  
+  if (result.type === 'error') {
+    throw new Error(`SQL Error: ${result.error.message}`);
+  }
+
+  const cols = result.response.result.cols.map(c => c.name);
+  const rows = result.response.result.rows.map(row => {
+    const obj = {};
+    row.forEach((cell, idx) => {
+      let val = null;
+      if (cell.type === 'integer') val = Number(cell.value);
+      else if (cell.type === 'float') val = parseFloat(cell.value);
+      else if (cell.type === 'text') val = cell.value;
+      else if (cell.type === 'blob') val = cell.value;
+      obj[cols[idx]] = val;
+    });
+    return obj;
+  });
+
+  return { rows, columns: cols };
+}
 
 const sessions = new Map();
 
 // تهيئة الجداول في السحابة
 async function initDB() {
-  await db.execute(`PRAGMA foreign_keys = ON;`);
+  await dbQuery(`PRAGMA foreign_keys = ON;`);
   
-  await db.execute(`
+  await dbQuery(`
     CREATE TABLE IF NOT EXISTS members (
       student_id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL,
       committee TEXT NOT NULL, points INTEGER NOT NULL DEFAULT 0,
@@ -28,14 +83,14 @@ async function initDB() {
     );
   `);
   
-  await db.execute(`
+  await dbQuery(`
     CREATE TABLE IF NOT EXISTS activities (
       id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
       points INTEGER NOT NULL CHECK(points >= 0), status TEXT NOT NULL DEFAULT 'نشط'
     );
   `);
   
-  await db.execute(`
+  await dbQuery(`
     CREATE TABLE IF NOT EXISTS point_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT, student_id TEXT NOT NULL,
       activity_id INTEGER, activity_name TEXT NOT NULL, logged_at TEXT NOT NULL,
@@ -45,32 +100,29 @@ async function initDB() {
     );
   `);
 
-  // التحقق من الأعمدة الإضافية وإضافتها إذا لم تكن موجودة
-  const memberColumns = (await db.execute('PRAGMA table_info(members)')).rows.map(c => c.name);
-  if (!memberColumns.includes('status')) await db.execute("ALTER TABLE members ADD COLUMN status TEXT NOT NULL DEFAULT 'مقبول'");
-  if (!memberColumns.includes('bio')) await db.execute("ALTER TABLE members ADD COLUMN bio TEXT NOT NULL DEFAULT ''");
-  if (!memberColumns.includes('skills')) await db.execute("ALTER TABLE members ADD COLUMN skills TEXT NOT NULL DEFAULT ''");
+  const memberColumnsRes = await dbQuery('PRAGMA table_info(members)');
+  const memberColumns = memberColumnsRes.rows.map(c => c.name);
+  if (!memberColumns.includes('status')) await dbQuery("ALTER TABLE members ADD COLUMN status TEXT NOT NULL DEFAULT 'مقبول'");
+  if (!memberColumns.includes('bio')) await dbQuery("ALTER TABLE members ADD COLUMN bio TEXT NOT NULL DEFAULT ''");
+  if (!memberColumns.includes('skills')) await dbQuery("ALTER TABLE members ADD COLUMN skills TEXT NOT NULL DEFAULT ''");
 
-  // إضافة الأنشطة الافتراضية إذا كانت الجدول فارغاً
-  const actCount = (await db.execute('SELECT COUNT(*) AS c FROM activities')).rows[0].c;
-  if (Number(actCount) === 0) {
+  const actCountRes = await dbQuery('SELECT COUNT(*) AS c FROM activities');
+  if (Number(actCountRes.rows[0].c) === 0) {
     const activities = [['اجتماع الفريق',5],['حضور ورشة',10],['المشاركة في فعالية',10],['تمثيل النادي في البوث',15],['تنظيم فعالية',15],['تنفيذ مهمة',10],['تقديم فكرة قابلة للتنفيذ',10],['تنفيذ مبادرة',25],['تصميم / تصوير / مونتاج',15],['قيادة مهمة',20]];
     for (const [name, points] of activities) {
-      await db.execute({ sql: 'INSERT INTO activities (name, points, status) VALUES (?, ?, ?)', args: [name, points, 'نشط'] });
+      await dbQuery('INSERT INTO activities (name, points, status) VALUES (?, ?, ?)', [name, points, 'نشط']);
     }
   }
 
-  // إضافة أعضاء افتراضيين إذا كان الجدول فارغاً
-  const memCount = (await db.execute('SELECT COUNT(*) AS c FROM members')).rows[0].c;
-  if (Number(memCount) === 0) {
+  const memCountRes = await dbQuery('SELECT COUNT(*) AS c FROM members');
+  if (Number(memCountRes.rows[0].c) === 0) {
     const members = [['441800001','سارة المطيري','0500000001','لجنة الإعلام',145],['441800002','عبدالعزيز العتيبي','0500000002','لجنة البرامج',128],['441800003','نورة الشمري','0500000003','لجنة العلاقات العامة',105],['441800004','محمد العنزي','0500000004','لجنة التنظيم',82],['441800005','الجوهرة القحطاني','0500000005','لجنة المحتوى',55],['441800006','فهد الدوسري','0500000006','لجنة التطوير',37]];
     for (const m of members) {
-      await db.execute({ sql: 'INSERT INTO members (student_id,name,phone,committee,points) VALUES (?,?,?,?,?)', args: m });
+      await dbQuery('INSERT INTO members (student_id,name,phone,committee,points) VALUES (?,?,?,?,?)', m);
     }
   }
 }
 
-// تشغيل تهيئة القاعدة عند بدء السيرفر
 initDB().catch(err => console.error('Database initialization error:', err));
 
 function level(points) {
@@ -84,9 +136,7 @@ async function enrich(m) {
   if (!m) return null;
   let rank = null;
   if (m.status === 'مقبول') {
-    const res = await db.execute({ sql: "SELECT COUNT(*) + 1 AS r FROM members WHERE status='mقبول' OR status='مقبول' AND points > ?", args: [m.points] });
-    // للتأكد الدقيق من الرتبة بناءً على النقاط
-    const exactRes = await db.execute({ sql: "SELECT COUNT(*) + 1 AS r FROM members WHERE status='مقبول' AND points > ?", args: [m.points] });
+    const exactRes = await dbQuery("SELECT COUNT(*) + 1 AS r FROM members WHERE status='مقبول' AND points > ?", [m.points]);
     rank = exactRes.rows[0].r;
   }
   return { ...m, level: level(m.points), rank };
@@ -104,7 +154,7 @@ async function api(req,res,url) {
   
   if (method==='GET' && p==='/api/member') { 
     const id=url.searchParams.get('student_id'); 
-    const mRes = await db.execute({ sql: 'SELECT student_id,name,committee,points,status,created_at FROM members WHERE student_id=?', args: [id] });
+    const mRes = await dbQuery('SELECT student_id,name,committee,points,status,created_at FROM members WHERE student_id=?', [id]);
     const m = mRes.rows[0];
     if(!m) return send(res,404,{error:'لم نعثر على عضوية بهذا الرقم الجامعي'}); 
     if(m.status!=='مقبول') return send(res,403,{error:m.status==='قيد المراجعة'?'طلب عضويتك قيد المراجعة.':'تم رفض طلب العضوية.'}); 
@@ -112,7 +162,7 @@ async function api(req,res,url) {
   }
   
   if (method==='GET' && p==='/api/leaderboard') { 
-    const rowsRaw = (await db.execute("SELECT student_id,name,committee,points,status FROM members WHERE status='مقبول' ORDER BY points DESC, name ASC")).rows; 
+    const rowsRaw = (await dbQuery("SELECT student_id,name,committee,points,status FROM members WHERE status='مقبول' ORDER BY points DESC, name ASC")).rows; 
     const rows = [];
     for (const r of rowsRaw) {
       rows.push(await enrich(r));
@@ -125,10 +175,10 @@ async function api(req,res,url) {
     if(!b.student_id||!b.name||!b.phone||!b.committee) throw Error('أكمل الحقول المطلوبة'); 
     const valid=['لجنة الإرشاد','لجنة التصميم','لجنة التعيين والاختيار','لجنة التسويق والإعلام']; 
     if(!valid.includes(b.committee)) throw Error('اللجنة المختارة غير متاحة'); 
-    await db.execute({
-      sql: "INSERT INTO members(student_id,name,phone,committee,bio,skills,status,points) VALUES(?,?,?,?,?,?,'قيد المراجعة',0)",
-      args: [String(b.student_id).trim(), b.name.trim(), b.phone.trim(), b.committee, b.bio?.trim()||'', b.skills?.trim()||'']
-    });
+    await dbQuery(
+      "INSERT INTO members(student_id,name,phone,committee,bio,skills,status,points) VALUES(?,?,?,?,?,?,'قيد المراجعة',0)",
+      [String(b.student_id).trim(), b.name.trim(), b.phone.trim(), b.committee, b.bio?.trim()||'', b.skills?.trim()||'']
+    );
     return send(res,201,{ok:true,message:'تم إرسال طلبك بنجاح، وسيتم إشعارك بعد مراجعته.'}); 
   }
   
@@ -152,14 +202,14 @@ async function api(req,res,url) {
   if (!requireAdmin(req,res)) return;
   
   if (method==='GET' && p==='/api/admin/dashboard') {
-    const membersRaw = (await db.execute('SELECT * FROM members ORDER BY points DESC, name ASC')).rows;
+    const membersRaw = (await dbQuery('SELECT * FROM members ORDER BY points DESC, name ASC')).rows;
     const members = [];
     for (const m of membersRaw) {
       members.push(await enrich(m));
     }
     const accepted = members.filter(m => m.status === 'مقبول'); 
     const top = accepted[0] || null; 
-    const totalRes = await db.execute("SELECT COALESCE(SUM(points),0) AS n FROM members WHERE status='مقبول'");
+    const totalRes = await dbQuery("SELECT COALESCE(SUM(points),0) AS n FROM members WHERE status='مقبول'");
     const total = totalRes.rows[0].n;
     
     const counts = { مشارك:0, فعال:0, متميز:0, نخبة:0 }; 
@@ -170,8 +220,8 @@ async function api(req,res,url) {
       else counts.نخبة++; 
     });
     
-    const activitiesList = (await db.execute('SELECT * FROM activities ORDER BY id')).rows;
-    const logsList = (await db.execute('SELECT l.*, m.name AS member_name FROM point_logs l JOIN members m ON m.student_id=l.student_id ORDER BY l.id DESC LIMIT 100')).rows;
+    const activitiesList = (await dbQuery('SELECT * FROM activities ORDER BY id')).rows;
+    const logsList = (await dbQuery('SELECT l.*, m.name AS member_name FROM point_logs l JOIN members m ON m.student_id=l.student_id ORDER BY l.id DESC LIMIT 100')).rows;
 
     return send(res, 200, {
       stats: {
@@ -193,80 +243,106 @@ async function api(req,res,url) {
   
   if (method==='POST' && p==='/api/admin/members') { 
     if(!b.student_id||!b.name||!b.phone||!b.committee) throw Error('أكمل جميع بيانات العضو'); 
-    await db.execute({
-      sql: "INSERT INTO members (student_id,name,phone,committee,points,status,bio,skills) VALUES (?,?,?,?,?,'مقبول',?,?)",
-      args: [String(b.student_id).trim(), b.name.trim(), b.phone.trim(), b.committee.trim(), Number(b.points)||0, b.bio||'', b.skills||'']
-    });
+    await dbQuery(
+      "INSERT INTO members (student_id,name,phone,committee,points,status,bio,skills) VALUES (?,?,?,?,?,'مقبول',?,?)",
+      [String(b.student_id).trim(), b.name.trim(), b.phone.trim(), b.committee.trim(), Number(b.points)||0, b.bio||'', b.skills||'']
+    );
     return send(res,201,{ok:true}); 
   }
   
   if (method==='PUT' && p.startsWith('/api/admin/members/')) { 
     const id = decodeURIComponent(p.split('/').pop()); 
-    await db.execute({
-      sql: 'UPDATE members SET name=?,phone=?,committee=?,points=?,status=?,bio=?,skills=? WHERE student_id=?',
-      args: [b.name.trim(), b.phone.trim(), b.committee.trim(), Number(b.points)||0, b.status||'قيد المراجعة', b.bio||'', b.skills||'', id]
-    });
+    await dbQuery(
+      'UPDATE members SET name=?,phone=?,committee=?,points=?,status=?,bio=?,skills=? WHERE student_id=?',
+      [b.name.trim(), b.phone.trim(), b.committee.trim(), Number(b.points)||0, b.status||'قيد المراجعة', b.bio||'', b.skills||'', id]
+    );
     return send(res,200,{ok:true}); 
   }
   
   if (method==='POST' && p.startsWith('/api/admin/members/') && p.endsWith('/status')) { 
     const id = decodeURIComponent(p.split('/').slice(-2)[0]); 
     if(!['مقبول','مرفوض','قيد المراجعة'].includes(b.status)) throw Error('حالة غير صالحة'); 
-    await db.execute({ sql: 'UPDATE members SET status=? WHERE student_id=?', args: [b.status, id] });
+    await dbQuery('UPDATE members SET status=? WHERE student_id=?', [b.status, id]);
     return send(res,200,{ok:true}); 
   }
   
   if (method==='DELETE' && p.startsWith('/api/admin/members/')) { 
-    await db.execute({ sql: 'DELETE FROM members WHERE student_id=?', args: [decodeURIComponent(p.split('/').pop())] });
+    await dbQuery('DELETE FROM members WHERE student_id=?', [decodeURIComponent(p.split('/').pop())]);
     return send(res,200,{ok:true}); 
   }
   
   if (method==='POST' && p==='/api/admin/activities') { 
     if(!b.name) throw Error('اسم النشاط مطلوب'); 
-    await db.execute({ sql: 'INSERT INTO activities (name,points,status) VALUES (?,?,?)', args: [b.name.trim(), Number(b.points)||0, b.status||'نشط'] });
+    await dbQuery('INSERT INTO activities (name,points,status) VALUES (?,?,?)', [b.name.trim(), Number(b.points)||0, b.status||'نشط']);
     return send(res,201,{ok:true}); 
   }
   
   if (method==='PUT' && p.startsWith('/api/admin/activities/')) { 
-    await db.execute({ sql: 'UPDATE activities SET name=?,points=?,status=? WHERE id=?', args: [b.name.trim(), Number(b.points)||0, b.status, Number(p.split('/').pop())] });
+    await dbQuery('UPDATE activities SET name=?,points=?,status=? WHERE id=?', [b.name.trim(), Number(b.points)||0, b.status, Number(p.split('/').pop())]);
     return send(res,200,{ok:true}); 
   }
   
   if (method==='DELETE' && p.startsWith('/api/admin/activities/')) { 
-    await db.execute({ sql: 'DELETE FROM activities WHERE id=?', args: [Number(p.split('/').pop())] });
+    await dbQuery('DELETE FROM activities WHERE id=?', [Number(p.split('/').pop())]);
     return send(res,200,{ok:true}); 
   }
   
   if (method==='POST' && p==='/api/admin/logs') { 
-    const actRes = await db.execute({ sql: "SELECT * FROM activities WHERE id=? AND status='نشط'", args: [Number(b.activity_id)] });
+    const actRes = await dbQuery("SELECT * FROM activities WHERE id=? AND status='نشط'", [Number(b.activity_id)]);
     const a = actRes.rows[0];
-    const memRes = await db.execute({ sql: "SELECT * FROM members WHERE student_id=? AND status='مقبول'", args: [String(b.student_id)] });
+    const memRes = await dbQuery("SELECT * FROM members WHERE student_id=? AND status='مقبول'", [String(b.student_id)]);
     const m = memRes.rows[0];
     
     if(!a) throw Error('اختر نشاطًا نشطًا'); 
     if(!m) throw Error('يمكن تسجيل نقاط للأعضاء المقبولين فقط'); 
     
-    await db.batch([
-      { sql: 'INSERT INTO point_logs(student_id,activity_id,activity_name,logged_at,points,note) VALUES(?,?,?,?,?,?)', args: [m.student_id, a.id, a.name, b.logged_at || dateNow(), a.points, (b.note || '').trim()] },
-      { sql: 'UPDATE members SET points=points+? WHERE student_id=?', args: [a.points, m.student_id] }
-    ], 'write');
+    await dbQuery('INSERT INTO point_logs(student_id,activity_id,activity_name,logged_at,points,note) VALUES(?,?,?,?,?,?)', [m.student_id, a.id, a.name, b.logged_at || dateNow(), a.points, (b.note || '').trim()]);
+    await dbQuery('UPDATE members SET points=points+? WHERE student_id=?', [a.points, m.student_id]);
     
     return send(res,201,{ok:true}); 
   }
   
   if (method==='DELETE' && p.startsWith('/api/admin/logs/')) { 
     const logId = Number(p.split('/').pop());
-    const logRes = await db.execute({ sql: 'SELECT * FROM point_logs WHERE id=?', args: [logId] });
+    const logRes = await dbQuery('SELECT * FROM point_logs WHERE id=?', [logId]);
     const log = logRes.rows[0];
     if(!log) throw Error('السجل غير موجود'); 
     
-    await db.batch([
-      { sql: 'DELETE FROM point_logs WHERE id=?', args: [log.id] },
-      { sql: 'UPDATE members SET points=MAX(0,points-?) WHERE student_id=?', args: [log.points, log.student_id] }
-    ], 'write');
+    await dbQuery('DELETE FROM point_logs WHERE id=?', [log.id]);
+    await dbQuery('UPDATE members SET points=MAX(0,points-?) WHERE student_id=?', [log.points, log.student_id]);
     
     return send(res,200,{ok:true}); 
   }
   
   return send(res,404,{error:'غير موجود'});
 }
+
+const server = http.createServer(async (req, res) => {
+  const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+  if (parsedUrl.pathname.startsWith('/api/')) {
+    try {
+      await api(req, res, parsedUrl);
+    } catch (e) {
+      error(res, e);
+    }
+    return;
+  }
+  let filePath = path.join(ROOT, parsedUrl.pathname === '/' ? 'index.html' : parsedUrl.pathname);
+  if (!filePath.startsWith(ROOT)) { res.writeHead(403); return res.end('Access Denied'); }
+  fs.stat(filePath, (err, stats) => {
+    if (err || !stats.isFile()) {
+      filePath = path.join(ROOT, 'index.html');
+    }
+    fs.readFile(filePath, (err, data) => {
+      if (err) { res.writeHead(500); return res.end('Server Error'); }
+      const ext = path.extname(filePath);
+      const mime = { '.html':'text/html; charset=utf-8', '.css':'text/css; charset=utf-8', '.js':'application/javascript; charset=utf-8', '.png':'image/png', '.jpg':'image/jpeg' }[ext] || 'text/plain';
+      res.writeHead(200, { 'Content-Type': mime });
+      res.end(data);
+    });
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
